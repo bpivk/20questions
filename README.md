@@ -82,10 +82,6 @@ Insert the SD card and power on. The boot animation plays, then the word/questio
 [wordCnt x qCnt x int8_t, row-major]
 ```
 
-### Scoring
-
-Each word's score is the dot product of the player's answers with that word's weight row. Top 3 scores become guesses.
-
 ### Question Selection
 
 Picks the unasked question with the highest weight variance among plausible words. When weights are cold (few games played), falls back to a split-quality heuristic that prefers ~50/50 divisions.
@@ -95,10 +91,6 @@ Picks the unasked question with the highest weight variance among plausible word
 - **Correct guess:** correct word pulled toward answers, wrong words get small decay
 - **Wrong guess:** each rejected candidate pushed away from answers
 - **Teach:** existing words get strong update; new words appended with game answers as initial weights
-
-### SD Card I/O
-
-All weight updates use `"r+"` file mode (read-write without truncate). New rows use `FILE_APPEND`. The file is never reopened with `FILE_WRITE` except during a full reset, since `FILE_WRITE` truncates on ESP32.
 
 ## Files
 
@@ -138,7 +130,3 @@ Settings > Learning:
 | Wrong/random guesses | Weights wiped to zeros | Replace `weights.bin` + `words.csv` |
 | Square symbols in quips | Non-ASCII characters in strings | Update to latest sketch |
 | Weights reset after teaching | Old sketch uses `FILE_WRITE` (truncates) | Flash latest sketch (uses `"r+"`) |
-
-## License
-
-MIT - see [LICENSE](LICENSE)
