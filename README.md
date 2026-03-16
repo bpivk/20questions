@@ -1,0 +1,144 @@
+# 20 Questions - M5Cardputer
+
+A self-learning 20 Questions game for the [M5Cardputer](https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3) (ESP32-S3). Think of a word, answer 20 yes/no questions, and the handheld tries to guess it. It learns from every game.
+
+## Features
+
+- **1,126 words** out of the box - animals, plants, objects, vehicles, instruments, concepts, fantasy creatures, and more
+- **88 questions** covering category, size, material, biology, location, and function
+- **Self-learning** - weights update after every game
+- **Category picker** - choose Animal, Plant, Object, Concept, or Not Sure
+- **Smart question exclusion** - redundant questions are skipped (e.g. "Does it have fur?" after selecting Plant)
+- **Personality quips** - thinking comments between questions, with early/mid/late phases
+- **Teach new words** - when the game loses, add your word to its vocabulary
+- **Statistics** - win/loss ratio, streaks, total questions, last word taught
+- **Settings** - sound, screen timeout, learning rate, confirm-on-quit
+- **Unlimited words** - streamed from SD in chunks, no PSRAM needed
+- **Boot animation** - animated 20Q logo on startup
+- **Corruption detection** - checks weight file integrity on boot
+
+## Hardware
+
+- M5Cardputer (M5StampS3 + keyboard + display + SD card slot)
+- MicroSD card (any size - the game uses under 200KB)
+
+## Installation
+
+### 1. Flash the sketch
+
+Open `TwentyQ.ino` in Arduino IDE with M5Stack board support installed. Select board **M5Cardputer** (or M5StampS3) and upload.
+
+**Required library:** `M5Cardputer` ([M5Stack GitHub](https://github.com/m5stack/M5Cardputer))
+
+### 2. Copy SD card files
+
+Copy the contents of `sd_card/` to your MicroSD card root. You should end up with:
+
+```
+SD card root/
+  TwentyQ/
+    words.csv       (11 KB - word list)
+    questions.csv   (2.5 KB - question list)
+    weights.bin     (99,100 bytes - weight matrix)
+    settings.cfg    (optional - auto-created)
+    stats.cfg       (optional - auto-created)
+```
+
+> **Verify** that `weights.bin` is exactly **99,100 bytes** on the SD card. If smaller, the copy was interrupted.
+
+### 3. Boot and play
+
+Insert the SD card and power on. The boot animation plays, then the word/question count is shown. If the weights file has a problem, a red warning appears.
+
+## How to Play
+
+1. **Think of a word** - anything from "dog" to "lightning" to "pizza"
+2. **Pick a category** - Animal, Plant, Object, Concept, or Not Sure
+3. **Answer 20 questions** using the answer grid:
+   - **Page 1:** Yes, Probably, Usually, No, Unknown, Sometimes
+   - **Page 2:** Maybe, Partly, Depends, Rarely, Doubtful, Irrelevant
+4. **See the guess** - top 3 guesses with confidence scores
+5. **Teach it** - if wrong, type the correct word
+
+### Controls
+
+| Key | Action |
+|-----|--------|
+| `;` | Up |
+| `.` | Down |
+| `,` | Left |
+| `/` | Right |
+| Enter | Select |
+| Backspace | Back / Quit |
+
+## How It Works
+
+### Weight Matrix
+
+`weights.bin` stores a `words x questions` matrix of `int8_t` values (-127 to +127). Layout:
+
+```
+[4 bytes magic][4 bytes wordCnt][4 bytes qCnt]
+[wordCnt x qCnt x int8_t, row-major]
+```
+
+### Scoring
+
+Each word's score is the dot product of the player's answers with that word's weight row. Top 3 scores become guesses.
+
+### Question Selection
+
+Picks the unasked question with the highest weight variance among plausible words. When weights are cold (few games played), falls back to a split-quality heuristic that prefers ~50/50 divisions.
+
+### Learning
+
+- **Correct guess:** correct word pulled toward answers, wrong words get small decay
+- **Wrong guess:** each rejected candidate pushed away from answers
+- **Teach:** existing words get strong update; new words appended with game answers as initial weights
+
+### SD Card I/O
+
+All weight updates use `"r+"` file mode (read-write without truncate). New rows use `FILE_APPEND`. The file is never reopened with `FILE_WRITE` except during a full reset, since `FILE_WRITE` truncates on ESP32.
+
+## Files
+
+| File | Description |
+|------|-------------|
+| `TwentyQ.ino` | Main sketch - flash to M5Cardputer |
+| `words.csv` | Word list, one per line. `#` = comment, `_` = space |
+| `questions.csv` | Question list, one per line. Max 90, 55 chars each |
+| `weights.bin` | Pre-built weight matrix (99,100 bytes for 1,126 x 88) |
+| `settings.cfg` | Key-value settings, auto-created if missing |
+| `stats.cfg` | Game statistics, auto-created if missing |
+| `sd_card/` | Ready-to-copy SD card contents |
+
+## Customization
+
+### Adding words
+
+- **In-game:** lose, then type the word when prompted
+- **Manually:** add to `words.csv` - the game auto-extends `weights.bin` on next boot
+
+### Adding questions
+
+Add to `questions.csv`. This triggers a weight reset on next boot (question count mismatch).
+
+### Learning rate
+
+Settings > Learning:
+- **Conservative** (0.10) - slow, stable
+- **Normal** (0.20) - default
+- **Aggressive** (0.35) - fast, may oscillate
+
+## Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Red "FILE CORRUPT" on boot | `weights.bin` truncated during copy | Re-copy, verify 99,100 bytes |
+| Wrong/random guesses | Weights wiped to zeros | Replace `weights.bin` + `words.csv` |
+| Square symbols in quips | Non-ASCII characters in strings | Update to latest sketch |
+| Weights reset after teaching | Old sketch uses `FILE_WRITE` (truncates) | Flash latest sketch (uses `"r+"`) |
+
+## License
+
+MIT - see [LICENSE](LICENSE)

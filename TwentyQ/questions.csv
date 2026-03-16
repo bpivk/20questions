@@ -1,0 +1,105 @@
+# 20Q questions.csv  (80 questions, max 55 chars each)
+# One question per line. Broad categories first, specifics later.
+# The neural net reorders these by information gain automatically.
+#
+# --- EXISTENCE / CATEGORY ---
+Is it an animal?
+Is it a plant?
+Is it a living thing?
+Is it man-made?
+Is it a natural object?
+Is it a concept or idea?
+Is it a type of food?
+Is it a type of drink?
+Is it a vehicle?
+Is it a tool or instrument?
+Is it a toy or game?
+Is it a piece of clothing?
+Is it a piece of furniture?
+Is it a building or structure?
+Is it a body part?
+Is it a sport or activity?
+Is it a musical instrument?
+Is it an electronic device?
+Is it a type of weapon?
+Is it a body of water?
+#
+# --- SIZE ---
+Is it bigger than a person?
+Is it bigger than a car?
+Is it bigger than a loaf of bread?
+Is it smaller than a tennis ball?
+Can you hold it in one hand?
+Can you carry it in a pocket?
+Is it tiny (smaller than a coin)?
+#
+# --- PHYSICAL PROPERTIES ---
+Is it hard?
+Is it soft?
+Is it heavy?
+Is it light (not heavy)?
+Is it flexible or bendable?
+Is it transparent or see-through?
+Is it shiny or reflective?
+Is it colourful?
+Is it always the same colour?
+Is it rough to the touch?
+Is it smooth to the touch?
+Is it sharp?
+Is it round or spherical?
+Is it flat?
+Is it long and thin?
+Does it have a hole in it?
+#
+# --- MATERIAL ---
+Is it made of metal?
+Is it made of wood?
+Is it made of plastic?
+Is it made of glass?
+Is it made of fabric or cloth?
+Is it made of paper?
+Is it made of rubber?
+Is it made of stone or rock?
+Is it edible?
+#
+# --- BIOLOGY / NATURE ---
+Does it have legs?
+Does it have wings?
+Does it have fur or hair?
+Does it have scales?
+Does it live in water?
+Does it live underground?
+Does it produce sound?
+Can it move on its own?
+Does it have a face?
+Does it lay eggs?
+Does it have roots?
+Does it have flowers?
+Does it have leaves?
+#
+# --- LOCATION / CONTEXT ---
+Is it found in a home?
+Is it found in a kitchen?
+Is it found in an office or school?
+Is it found outdoors in nature?
+Is it found in a shop?
+Is it found underground?
+Is it found in the sky?
+Is it found in the sea?
+Is it worn on the body?
+#
+# --- FUNCTION / USE ---
+Does it use electricity?
+Can you buy it in a shop?
+Is it used every day?
+Is it used for communication?
+Is it used for entertainment?
+Is it used for transport?
+Is it used for cooking?
+Is it used for writing or drawing?
+Is it used for cleaning?
+Does it have moving parts?
+Does it need batteries?
+Is it older than 100 years old?
+Does it have a screen or display?
+Can it be used more than once?
