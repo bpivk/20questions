@@ -110,7 +110,7 @@ All weight updates use `"r+"` file mode (read-write without truncate). New rows 
 | `weights.bin` | Pre-built weight matrix (99,100 bytes for 1,126 x 88) |
 | `settings.cfg` | Key-value settings, auto-created if missing |
 | `stats.cfg` | Game statistics, auto-created if missing |
-| `sd_card/` | Ready-to-copy SD card contents |
+| `TwentyQ` | Ready-to-copy SD card contents |
 
 ## Customization
 
