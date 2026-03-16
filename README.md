@@ -2,6 +2,9 @@
 
 A self-learning 20 Questions game for the [M5Cardputer](https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3) (ESP32-S3). Think of a word, answer 20 yes/no questions, and the handheld tries to guess it. It learns from every game.
 
+![Alt text](https://github.com/bpivk/20questions/blob/c52f8e4e211cc05d1164a3124ea8edd222263533/image/cover_320x240.png)
+
+
 ## Features
 
 - **1,126 words** out of the box - animals, plants, objects, vehicles, instruments, concepts, fantasy creatures, and more
