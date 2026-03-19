@@ -29,6 +29,9 @@
 #include <M5Cardputer.h>
 #include <SD.h>
 #include <FS.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -278,6 +281,11 @@ bool loadAll();
 bool createWeightFile();
 bool resizeWeightFile(int oldWordCnt);
 static void pageDots(int cur, int total);
+bool wifiDownloadFiles();
+bool needsDownload();
+
+// ── GitHub raw file URLs ──────────────────────────────────────────────────────
+#define GITHUB_BASE "https://raw.githubusercontent.com/bpivk/20questions/main/TwentyQ/"
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  SOUND
@@ -607,6 +615,231 @@ bool confirmDialog(const char* title,const char* q,bool defYes=true){
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  WIFI FILE DOWNLOAD
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Check if essential game files are missing
+bool needsDownload(){
+    return !SD.exists("/TwentyQ/words.csv") ||
+           !SD.exists("/TwentyQ/questions.csv") ||
+           !SD.exists("/TwentyQ/weights.bin");
+}
+
+// WiFi network picker - scan and show list
+static bool wifiConnect(){
+    screenInit("WiFi Setup");
+    bprint("Scanning...", C_DIM);
+
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    delay(200);
+    int n = WiFi.scanNetworks();
+
+    if(n <= 0){
+        screenInit("WiFi Setup");
+        bprint("No networks found.", C_ERR);
+        bprint("Press any key.", C_DIM);
+        waitCh();
+        return false;
+    }
+
+    // Build list of unique SSIDs
+    LItem items[16];
+    int cnt = 0;
+    for(int i = 0; i < n && cnt < 16; i++){
+        String ssid = WiFi.SSID(i);
+        if(!ssid.length()) continue;
+        // Skip duplicates
+        bool dup = false;
+        for(int j = 0; j < cnt; j++)
+            if(String(items[j].label) == ssid){ dup = true; break; }
+        if(dup) continue;
+
+        strncpy(items[cnt].label, ssid.c_str(), 51);
+        items[cnt].label[51] = 0;
+        int rssi = WiFi.RSSI(i);
+        items[cnt].lc = rssi > -50 ? C_OK : rssi > -70 ? C_WARN : C_ERR;
+        items[cnt].dot = items[cnt].lc;
+        cnt++;
+    }
+    WiFi.scanDelete();
+
+    int sel = runList(items, cnt, "Pick network");
+    if(sel < 0) return false;
+
+    String ssid = String(items[sel].label);
+    String pass = typeText("Password", ssid.c_str());
+    if(!pass.length()){
+        // Try open network
+        WiFi.begin(ssid.c_str());
+    } else {
+        WiFi.begin(ssid.c_str(), pass.c_str());
+    }
+
+    screenInit("Connecting...");
+    bprintf(C_TITFG, "%s", ssid.c_str());
+
+    unsigned long t0 = millis();
+    while(WiFi.status() != WL_CONNECTED && millis() - t0 < 15000){
+        delay(500);
+        M5Cardputer.Display.print(".");
+    }
+
+    if(WiFi.status() != WL_CONNECTED){
+        screenInit("WiFi Setup");
+        bprint("Connection failed.", C_ERR);
+        bprint("Press any key.", C_DIM);
+        waitCh();
+        WiFi.disconnect(true);
+        return false;
+    }
+
+    bprint("Connected!", C_OK);
+    delay(500);
+    return true;
+}
+
+// Download a single file from GitHub to SD, streaming in 1KB chunks.
+// Shows progress bar. Returns true on success.
+static bool downloadFile(const char* filename, const char* displayName){
+    String url = String(GITHUB_BASE) + filename;
+    char sdPath[64];
+    snprintf(sdPath, 64, "/TwentyQ/%s", filename);
+
+    Serial.printf("[DL] %s\n", url.c_str());
+
+    screenInit("Downloading");
+    bprint(displayName, C_TITFG);
+    bprint("Connecting...", C_DIM);
+
+    WiFiClientSecure client;
+    client.setInsecure();  // skip cert validation for GitHub
+    HTTPClient http;
+    http.begin(client, url);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.addHeader("User-Agent", "ESP32-20Q/1.0");
+    int httpCode = http.GET();
+
+    if(httpCode != 200){
+        bprintf(C_ERR, "HTTP %d", httpCode);
+        // Show filename for debugging
+        bprintf(C_DIM, "File: %s", filename);
+        bprint("Press any key.", C_DIM);
+        http.end();
+        waitCh();
+        return false;
+    }
+
+    int totalSize = http.getSize();
+    WiFiClient* stream = http.getStreamPtr();
+
+    // Remove old file if exists
+    if(SD.exists(sdPath)) SD.remove(sdPath);
+    File f = SD.open(sdPath, FILE_WRITE);
+    if(!f){
+        bprint("SD write failed!", C_ERR);
+        http.end();
+        waitCh();
+        return false;
+    }
+
+    // Progress bar area
+    int barY = BODYY + LH * 2 + 8;
+    int barH = 8;
+    M5Cardputer.Display.drawRect(4, barY, DW - 8, barH, C_DIM);
+
+    uint8_t buf[1024];
+    int written = 0;
+    int lastPct = -1;
+
+    while(http.connected() && (totalSize > 0 ? written < totalSize : true)){
+        size_t avail = stream->available();
+        if(avail){
+            int toRead = avail > sizeof(buf) ? sizeof(buf) : avail;
+            int bytesRead = stream->readBytes(buf, toRead);
+            if(bytesRead > 0){
+                f.write(buf, bytesRead);
+                written += bytesRead;
+
+                // Update progress bar
+                if(totalSize > 0){
+                    int pct = written * 100 / totalSize;
+                    if(pct != lastPct){
+                        lastPct = pct;
+                        int barW = (DW - 10) * pct / 100;
+                        M5Cardputer.Display.fillRect(5, barY + 1, barW, barH - 2, C_OK);
+                        M5Cardputer.Display.setTextSize(1);
+                        M5Cardputer.Display.setTextColor(C_DIM, C_BG);
+                        M5Cardputer.Display.fillRect(4, barY + barH + 2, DW - 8, 10, C_BG);
+                        M5Cardputer.Display.setCursor(4, barY + barH + 2);
+                        M5Cardputer.Display.printf("%d / %d bytes", written, totalSize);
+                    }
+                }
+            }
+        } else {
+            delay(10);
+        }
+        if(totalSize > 0 && written >= totalSize) break;
+    }
+
+    f.close();
+    http.end();
+
+    // Verify size
+    File vf = SD.open(sdPath);
+    size_t actualSize = vf ? vf.size() : 0;
+    if(vf) vf.close();
+
+    if(totalSize > 0 && (int)actualSize != totalSize){
+        bprintf(C_ERR, "Size mismatch! %u/%d", actualSize, totalSize);
+        bprint("Press any key.", C_DIM);
+        waitCh();
+        return false;
+    }
+
+    // Fill progress bar to 100%
+    M5Cardputer.Display.fillRect(5, barY + 1, DW - 10, barH - 2, C_OK);
+    M5Cardputer.Display.fillRect(4, barY + barH + 2, DW - 8, 10, C_BG);
+    M5Cardputer.Display.setTextSize(1);
+    M5Cardputer.Display.setTextColor(C_OK, C_BG);
+    M5Cardputer.Display.setCursor(4, barY + barH + 2);
+    M5Cardputer.Display.printf("Done! %u bytes", actualSize);
+    delay(600);
+    return true;
+}
+
+// Main download flow - connect WiFi, download all files
+bool wifiDownloadFiles(){
+    if(!wifiConnect()){
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+        return false;
+    }
+
+    bool ok = true;
+    if(ok) ok = downloadFile("words.csv",     "words.csv");
+    if(ok) ok = downloadFile("questions.csv", "questions.csv");
+    if(ok) ok = downloadFile("weights.bin",   "weights.bin");
+
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+
+    if(ok){
+        screenInit("Download complete!");
+        bprint("All files ready.", C_OK);
+        bprint("Loading game...", C_DIM);
+        delay(1200);
+    } else {
+        screenInit("Download failed");
+        bprint("Some files missing.", C_ERR);
+        bprint("Try again from", C_DIM);
+        bprint("Settings menu.", C_DIM);
+        waitCh();
+    }
+    return ok;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  SETTINGS
 // ═══════════════════════════════════════════════════════════════════════════════
 void loadSettings(){
@@ -668,9 +901,9 @@ void saveStats(){
 // Enter executes action rows (Reload, Reset stats, Reset weights).
 // Backspace exits.
 void settingsMenu(){
-    const int NROWS = 7;
+    const int NROWS = 8;
     int sel = 0;
-    int sc  = 0;   // scroll offset
+    int sc  = 0;
 
     struct SettingRow {
         const char* key;
@@ -710,15 +943,20 @@ void settingsMenu(){
         rows[4].vc = C_DIM;
         rows[4].isAction = true;
 
-        rows[5].key = "Reset stats";
+        rows[5].key = "Download files";
         rows[5].val[0] = 0;
-        rows[5].vc = C_WARN;
+        rows[5].vc = C_TITFG;
         rows[5].isAction = true;
 
-        rows[6].key = "Reset weights";
+        rows[6].key = "Reset stats";
         rows[6].val[0] = 0;
-        rows[6].vc = C_ERR;
+        rows[6].vc = C_WARN;
         rows[6].isAction = true;
+
+        rows[7].key = "Reset weights";
+        rows[7].val[0] = 0;
+        rows[7].vc = C_ERR;
+        rows[7].isAction = true;
     };
 
     auto draw = [&](){
@@ -807,6 +1045,12 @@ void settingsMenu(){
                 delay(1200);
                 draw();
             } else if(sel == 5){
+                if(confirmDialog("Download?", "Overwrite files?", false)){
+                    wifiDownloadFiles();
+                    loadAll();
+                }
+                draw();
+            } else if(sel == 6){
                 if(confirmDialog("Reset stats?", "Wipe all stats?", false)){
                     g_stats = {0,0,0,0,0,0,0,""};
                     saveStats();
@@ -817,7 +1061,7 @@ void settingsMenu(){
                     delay(900);
                     draw();
                 }
-            } else if(sel == 6){
+            } else if(sel == 7){
                 if(confirmDialog("Reset weights?", "Wipe all learning?", false)){
                     M5Cardputer.Display.fillScreen(C_BG); titleBar("Resetting...");
                     M5Cardputer.Display.setTextSize(2); M5Cardputer.Display.setTextColor(C_WARN, C_BG);
@@ -2197,21 +2441,28 @@ void setup(){
     bool sdOk=SD.begin(M5.getPin(m5::pin_name_t::sd_spi_ss));
     if(sdOk){
         if(!SD.exists("/TwentyQ")) SD.mkdir("/TwentyQ");
+
+        // First boot: offer WiFi download if game files are missing
+        if(needsDownload()){
+            screenInit("First run!");
+            bprint("Game files not found.", C_WARN);
+            bprint("Download via WiFi?", C_FG);
+            bprint("", C_BG);
+            bprint("(Press Bksp to skip)", C_DIM);
+            if(confirmDialog("Setup", "Download files?", true)){
+                wifiDownloadFiles();
+            }
+            // Redraw boot animation after download screens
+            bootAnimation();
+        }
+
         loadSettings();
         loadStats();
-        M5Cardputer.Display.setTextSize(1);
-        M5Cardputer.Display.setTextColor(C_DIM,C_BG);
-        M5Cardputer.Display.setCursor(4, DH - 22); M5Cardputer.Display.print("Loading...");
         if(loadAll()){
+            // Check weights integrity silently - only show errors
             File wf=SD.open("/TwentyQ/weights.bin");
             size_t wfSize=wf?wf.size():0; if(wf)wf.close();
             size_t wfExpected=WEIGHT_HDR+(size_t)g_wordCnt*g_qCnt;
-
-            M5Cardputer.Display.fillRect(0, DH - 22, DW, 22, C_BG);
-            M5Cardputer.Display.setTextSize(1);
-            M5Cardputer.Display.setTextColor(C_OK,C_BG);
-            M5Cardputer.Display.setCursor(4, DH - 12);
-            M5Cardputer.Display.printf("%d words, %d questions",g_wordCnt,g_qCnt);
 
             if(wfSize!=wfExpected){
                 M5Cardputer.Display.fillScreen(C_BG);
@@ -2230,20 +2481,25 @@ void setup(){
                 delay(5000);
             }
         } else {
-            M5Cardputer.Display.fillRect(0, DH - 22, DW, 22, C_BG);
-            M5Cardputer.Display.setTextSize(1);
+            M5Cardputer.Display.fillScreen(C_BG);
+            M5Cardputer.Display.setTextSize(2);
             M5Cardputer.Display.setTextColor(C_ERR,C_BG);
-            M5Cardputer.Display.setCursor(4, DH - 22); M5Cardputer.Display.print("Missing CSV files!");
+            M5Cardputer.Display.setCursor(4, 30);
+            M5Cardputer.Display.print("Missing files!");
+            M5Cardputer.Display.setTextSize(1);
             M5Cardputer.Display.setTextColor(C_DIM,C_BG);
-            M5Cardputer.Display.setCursor(4, DH - 12); M5Cardputer.Display.print("Need: words.csv + questions.csv");
+            M5Cardputer.Display.setCursor(4, 60);
+            M5Cardputer.Display.print("Need: words.csv + questions.csv");
+            delay(3000);
         }
     } else {
-        M5Cardputer.Display.fillRect(0, DH - 12, DW, 12, C_BG);
-        M5Cardputer.Display.setTextSize(1);
+        M5Cardputer.Display.fillScreen(C_BG);
+        M5Cardputer.Display.setTextSize(2);
         M5Cardputer.Display.setTextColor(C_ERR,C_BG);
-        M5Cardputer.Display.setCursor(4, DH - 12); M5Cardputer.Display.print("SD card mount failed!");
+        M5Cardputer.Display.setCursor(4, 40);
+        M5Cardputer.Display.print("No SD card!");
+        delay(3000);
     }
-    delay(1500);
     runMenu();
 }
 void loop(){ vTaskDelay(50/portTICK_PERIOD_MS); }
