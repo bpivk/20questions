@@ -122,6 +122,7 @@ struct Settings {
     int  timeoutSec;
     bool confirmQuit;      // prompt before quitting a game
     int  learnRate;        // 0=conservative 1=normal 2=aggressive
+    int  brightness;       // display brightness: 40/80/128/200
 };
 struct Candidate { int idx; float score; };
 struct Stats {
@@ -133,6 +134,8 @@ struct Stats {
     int  bestPlayerStreak; // best player win streak
     int  totalQuestions;   // sum of questions asked across all games
     char lastWord[WORD_LEN]; // last word that stumped it
+    int  catGames[5];      // games played per category (matches CATEGORIES[])
+    int  catWins[5];       // computer wins per category
 };
 #define TOP_N 3
 
@@ -153,8 +156,8 @@ static int     g_askedCnt  = 0;
 // CHUNK_SIZE words x MAX_QUESTIONS questions x 1 byte = 45KB
 static int8_t* g_chunk     = nullptr;
 
-static Settings      g_cfg       = { false, 60, true, 1 };
-static Stats         g_stats     = { 0, 0, 0, 0, 0, 0, 0, "" };
+static Settings      g_cfg       = { false, 60, true, 1, 128 };
+static Stats         g_stats     = { 0, 0, 0, 0, 0, 0, 0, "", {0,0,0,0,0}, {0,0,0,0,0} };
 static unsigned long g_lastInput = 0;
 
 // ── Personality comments - shown between questions to mask SD I/O ─────────────
@@ -300,7 +303,7 @@ void beep(int freq=1000, int ms=30){
 // ═══════════════════════════════════════════════════════════════════════════════
 //  TIMEOUT
 // ═══════════════════════════════════════════════════════════════════════════════
-void touchInput(){ g_lastInput=millis(); M5Cardputer.Display.setBrightness(128); }
+void touchInput(){ g_lastInput=millis(); M5Cardputer.Display.setBrightness(g_cfg.brightness); }
 void checkTimeout(){
     if(!g_cfg.timeoutSec) return;
     if((millis()-g_lastInput)/1000>=(unsigned long)g_cfg.timeoutSec)
@@ -334,6 +337,14 @@ void titleBar(const char* t, const char* r=nullptr){
     M5Cardputer.Display.setCursor(4,2); M5Cardputer.Display.print(t);
     if(r){ int rw=strlen(r)*12; M5Cardputer.Display.setTextColor(C_WARN,C_TITBG);
            M5Cardputer.Display.setCursor(DW-rw-4,2); M5Cardputer.Display.print(r); }
+    // Battery indicator - small bar in bottom-right corner of title bar
+    int bat = constrain((int)M5Cardputer.Power.getBatteryLevel(), 0, 100);
+    int bw  = bat * 18 / 100;
+    uint16_t bc = bat > 50 ? C_OK : bat > 20 ? C_WARN : C_ERR;
+    M5Cardputer.Display.fillRect(DW-23, TITLEH-5, 20, 4, C_DIM);
+    M5Cardputer.Display.fillRect(DW-23, TITLEH-5, bw,  4, bc);
+    M5Cardputer.Display.drawRect(DW-23, TITLEH-5, 20,  4, C_FG);
+    M5Cardputer.Display.fillRect(DW- 3, TITLEH-4,  2,  2, C_FG); // terminal nub
 }
 
 void screenInit(const char* t){
@@ -854,15 +865,16 @@ void loadSettings(){
             if(k=="timeout")     g_cfg.timeoutSec =v.toInt();
             if(k=="confirmquit") g_cfg.confirmQuit=(v=="1");
             if(k=="learnrate")   g_cfg.learnRate  =constrain(v.toInt(),0,2);
+            if(k=="brightness")  g_cfg.brightness =constrain(v.toInt(),20,255);
         }
         pos=nl+1;
     }
 }
 void saveSettings(){
     File f=SD.open("/TwentyQ/settings.cfg",FILE_WRITE); if(!f)return;
-    f.printf("sound=%d\ntimeout=%d\nconfirmquit=%d\nlearnrate=%d\n",
+    f.printf("sound=%d\ntimeout=%d\nconfirmquit=%d\nlearnrate=%d\nbrightness=%d\n",
              g_cfg.soundOn?1:0, g_cfg.timeoutSec,
-             g_cfg.confirmQuit?1:0, g_cfg.learnRate);
+             g_cfg.confirmQuit?1:0, g_cfg.learnRate, g_cfg.brightness);
     f.close();
 }
 
@@ -882,6 +894,11 @@ void loadStats(){
             if(k=="bestplayer")  g_stats.bestPlayerStreak=v.toInt();
             if(k=="totalq")      g_stats.totalQuestions =v.toInt();
             if(k=="lastword")    strncpy(g_stats.lastWord,v.c_str(),WORD_LEN-1);
+            for(int i=0;i<5;i++){
+                char key[16];
+                snprintf(key,16,"catgames%d",i); if(k==key) g_stats.catGames[i]=v.toInt();
+                snprintf(key,16,"catwins%d", i); if(k==key) g_stats.catWins[i] =v.toInt();
+            }
         }
         pos=nl+1;
     }
@@ -892,6 +909,8 @@ void saveStats(){
              g_stats.playerWins, g_stats.computerWins, g_stats.gamesPlayed,
              g_stats.currentStreak, g_stats.bestStreak, g_stats.bestPlayerStreak,
              g_stats.totalQuestions, g_stats.lastWord);
+    for(int i=0;i<5;i++)
+        f.printf("catgames%d=%d\ncatwins%d=%d\n",i,g_stats.catGames[i],i,g_stats.catWins[i]);
     f.close();
 }
 
@@ -901,7 +920,7 @@ void saveStats(){
 // Enter executes action rows (Reload, Reset stats, Reset weights).
 // Backspace exits.
 void settingsMenu(){
-    const int NROWS = 8;
+    const int NROWS = 9;
     int sel = 0;
     int sc  = 0;
 
@@ -938,25 +957,33 @@ void settingsMenu(){
         rows[3].vc = g_cfg.confirmQuit ? C_OK : C_DIM;
         rows[3].isAction = false;
 
-        rows[4].key = "Reload wordlist";
-        rows[4].val[0] = 0;
-        rows[4].vc = C_DIM;
-        rows[4].isAction = true;
+        const char* br = g_cfg.brightness<=40  ? "Dim"    :
+                         g_cfg.brightness<=80  ? "Low"    :
+                         g_cfg.brightness<=128 ? "Normal" : "Bright";
+        rows[4].key = "Brightness";
+        snprintf(rows[4].val, 28, "%s", br);
+        rows[4].vc = C_TITFG;
+        rows[4].isAction = false;
 
-        rows[5].key = "Download files";
+        rows[5].key = "Reload wordlist";
         rows[5].val[0] = 0;
-        rows[5].vc = C_TITFG;
+        rows[5].vc = C_DIM;
         rows[5].isAction = true;
 
-        rows[6].key = "Reset stats";
+        rows[6].key = "Download files";
         rows[6].val[0] = 0;
-        rows[6].vc = C_WARN;
+        rows[6].vc = C_TITFG;
         rows[6].isAction = true;
 
-        rows[7].key = "Reset weights";
+        rows[7].key = "Reset stats";
         rows[7].val[0] = 0;
-        rows[7].vc = C_ERR;
+        rows[7].vc = C_WARN;
         rows[7].isAction = true;
+
+        rows[8].key = "Reset weights";
+        rows[8].val[0] = 0;
+        rows[8].vc = C_ERR;
+        rows[8].isAction = true;
     };
 
     auto draw = [&](){
@@ -1031,9 +1058,18 @@ void settingsMenu(){
             }
             else if(sel == 2){ g_cfg.learnRate = (g_cfg.learnRate + 3 + d) % 3; saveSettings(); }
             else if(sel == 3){ g_cfg.confirmQuit = !g_cfg.confirmQuit; saveSettings(); }
+            else if(sel == 4){
+                const int bvals[] = {40, 80, 128, 200};
+                int cur = 3;  // default to Normal if not found
+                for(int i = 0; i < 4; i++) if(bvals[i] >= g_cfg.brightness){ cur = i; break; }
+                cur = (cur + 4 + d) % 4;
+                g_cfg.brightness = bvals[cur];
+                M5Cardputer.Display.setBrightness(g_cfg.brightness);
+                saveSettings();
+            }
             draw();
         } else if(c == '\r'){
-            if(sel == 4){
+            if(sel == 5){
                 M5Cardputer.Display.fillScreen(C_BG); titleBar("Reloading...");
                 M5Cardputer.Display.setTextSize(2); M5Cardputer.Display.setTextColor(C_DIM, C_BG);
                 M5Cardputer.Display.setCursor(4, BODYY + 4);
@@ -1044,15 +1080,15 @@ void settingsMenu(){
                 M5Cardputer.Display.printf("%d words loaded", g_wordCnt);
                 delay(1200);
                 draw();
-            } else if(sel == 5){
+            } else if(sel == 6){
                 if(confirmDialog("Download?", "Overwrite files?", false)){
                     wifiDownloadFiles();
                     loadAll();
                 }
                 draw();
-            } else if(sel == 6){
+            } else if(sel == 7){
                 if(confirmDialog("Reset stats?", "Wipe all stats?", false)){
-                    g_stats = {0,0,0,0,0,0,0,""};
+                    g_stats = {0,0,0,0,0,0,0,"",{0,0,0,0,0},{0,0,0,0,0}};
                     saveStats();
                     M5Cardputer.Display.fillScreen(C_BG); titleBar("Done");
                     M5Cardputer.Display.setTextSize(2); M5Cardputer.Display.setTextColor(C_OK, C_BG);
@@ -1061,7 +1097,7 @@ void settingsMenu(){
                     delay(900);
                     draw();
                 }
-            } else if(sel == 7){
+            } else if(sel == 8){
                 if(confirmDialog("Reset weights?", "Wipe all learning?", false)){
                     M5Cardputer.Display.fillScreen(C_BG); titleBar("Resetting...");
                     M5Cardputer.Display.setTextSize(2); M5Cardputer.Display.setTextColor(C_WARN, C_BG);
@@ -1360,13 +1396,17 @@ void updateWordWeights(int wordIdx, bool isCorrect){
 //   2. Wrong words with disagreeing weights: moderate pull toward -answer
 //   3. Wrong words with AGREEING weights: small decay toward 0
 void updateAllWeights(int correctIdx){
-    screenInit("Updating...");
-    bprint("Updating my brain.",C_DIM);
-    bprintf(C_DIM,"(%d words)",g_wordCnt);
+    M5Cardputer.Display.fillScreen(C_BG); titleBar("Updating...");
+    M5Cardputer.Display.setTextSize(2); M5Cardputer.Display.setTextColor(C_DIM,C_BG);
+    M5Cardputer.Display.setCursor(4, BODYY+4);    M5Cardputer.Display.print("Updating my brain.");
+    M5Cardputer.Display.setCursor(4, BODYY+4+LH); M5Cardputer.Display.printf("(%d words)",g_wordCnt);
+    // Progress bar outline
+    const int barY = BODYY+4+LH*2+8;
+    M5Cardputer.Display.drawRect(4, barY, DW-8, 8, C_DIM);
 
     float lr      = LEARN_RATES[g_cfg.learnRate];
     float lr_soft = LEARN_RATES_SOFT[g_cfg.learnRate];
-    float lr_decay = lr_soft * 0.5f;   // very gentle decay for agreeing wrong words
+    float lr_decay = lr_soft * 0.5f;
 
     File f=SD.open("/TwentyQ/weights.bin","r+"); if(!f)return;
     f.seek(WEIGHT_HDR);
@@ -1383,7 +1423,7 @@ void updateAllWeights(int correctIdx){
             for(int j=0;j<g_askedCnt;j++){
                 int q=g_askedOrder[j];
                 float ans=g_answers[q];
-                if(ans==ANS_IRRELEVANT) continue;   // no learning signal
+                if(ans==ANS_IRRELEVANT) continue;
                 float wf=(float)g_chunk[i*g_qCnt+q]/127.f;
                 float newW;
                 if(wi==correctIdx){
@@ -1394,7 +1434,7 @@ void updateAllWeights(int correctIdx){
                     } else if(fabsf(wf) > 0.01f) {
                         newW=wf*(1.f - lr_decay);
                     } else {
-                        newW=wf;  // near-zero, leave alone
+                        newW=wf;
                     }
                 }
                 if(newW>1.f)newW=1.f; if(newW<-1.f)newW=-1.f;
@@ -1404,6 +1444,9 @@ void updateAllWeights(int correctIdx){
         f.seek(off);
         f.write((uint8_t*)g_chunk,(size_t)batch*g_qCnt);
         w+=batch;
+        // Update progress bar
+        int bw = (int)((float)w / (float)g_wordCnt * (DW-10));
+        M5Cardputer.Display.fillRect(5, barY+1, bw, 6, C_OK);
     }
     f.close();
 }
@@ -1796,7 +1839,8 @@ static void applyExclusions(int qi, float ansVal, bool* asked){
             if(!asked[tq]){
                 asked[tq]     = true;
                 g_answers[tq] = ANS_NO;   // implied "no" - participates in scoring+learning
-                g_askedOrder[g_askedCnt++] = tq;  // included in learning pass
+                if(g_askedCnt < MAX_QUESTIONS)
+                    g_askedOrder[g_askedCnt++] = tq;  // included in learning pass
             }
         }
     }
@@ -1896,23 +1940,77 @@ void runGame(){
     g_askedCnt = 0;
 
     // Category picker - acts as Q0, pre-fills several answers at once
-    askCategory(asked);
+    int catIdx = askCategory(asked);
 
-    // Ask exactly MAX_Q_PER_GAME questions - no early guessing
+    // Ask up to MAX_Q_PER_GAME questions; may exit early if confidence is high
+    Candidate earlyTop[TOP_N];
+    int        earlyFound  = 0;
+    bool       doEarlyGuess = false;
+
     for(int turn=0;turn<MAX_Q_PER_GAME;turn++){
-        // Show a personality quip at ~5 dramatic moments per game:
-        // turns 4, 8, 12, 16, 19 - spread across early/mid/late phases.
+        // Show a personality quip at ~5 dramatic moments per game.
         // The quip screen also masks the pickNextQuestion chunk scan.
-        // All other turns go straight to the question with no delay.
         bool showQ = (turn==3||turn==7||turn==11||turn==15||turn==18);
         if(showQ) showQuip(turn + 1);
 
         int qi = pickNextQuestion(asked);
         if(qi < 0) break;
 
-        // If we showed a quip, the SD load has now finished - wait for keypress
-        // before moving on to the question screen.
+        // At quip turns past halfway, also score words to check for early guess.
+        // Both SD scans happen during the quip display, masking the latency.
+        if(showQ && turn >= 11 && g_askedCnt >= 8){
+            earlyFound = scoreAllWords(earlyTop, TOP_N, turn+1, false);
+            if(earlyFound > 0){
+                float conf = (g_askedCnt > 0)
+                    ? (earlyTop[0].score / (float)g_askedCnt * 50.f + 50.f)
+                    : 50.f;
+                if(conf > 90.f) doEarlyGuess = true;
+            }
+        }
+
         if(showQ) waitForQuipDismiss();
+
+        // Offer early guess if confidence is very high
+        if(doEarlyGuess){
+            doEarlyGuess = false;
+            char eg_name[WORD_LEN] = {};
+            readWordName(earlyTop[0].idx, eg_name, WORD_LEN);
+            for(int i=0; eg_name[i]; i++) if(eg_name[i]=='_') eg_name[i]=' ';
+
+            M5Cardputer.Display.fillScreen(C_BG);
+            titleBar("Early guess!");
+            M5Cardputer.Display.setTextSize(2);
+            M5Cardputer.Display.setTextColor(C_TITFG, C_BG);
+            M5Cardputer.Display.setCursor(4, BODYY+4);
+            M5Cardputer.Display.print("I think I know!");
+            M5Cardputer.Display.setCursor(4, BODYY+4+LH);
+            M5Cardputer.Display.print("Guess now?");
+            M5Cardputer.Display.setTextSize(1);
+            M5Cardputer.Display.setTextColor(C_DIM, C_BG);
+            M5Cardputer.Display.setCursor(4, BODYY+4+LH*2+4);
+            M5Cardputer.Display.printf("(or keep asking %d more)", MAX_Q_PER_GAME - turn);
+
+            int egSel = 0;
+            auto drawEG = [&](){
+                uint16_t yb = (egSel==0) ? C_OK  : C_DIM;
+                uint16_t nb = (egSel==1) ? C_ERR : C_DIM;
+                M5Cardputer.Display.fillRoundRect(18,  BODYY+4+LH*3+4, 84, LH+4, 4, yb);
+                M5Cardputer.Display.fillRoundRect(136, BODYY+4+LH*3+4, 84, LH+4, 4, nb);
+                M5Cardputer.Display.setTextSize(2);
+                M5Cardputer.Display.setTextColor(C_BG, yb);
+                M5Cardputer.Display.setCursor(36,  BODYY+4+LH*3+6); M5Cardputer.Display.print("YES");
+                M5Cardputer.Display.setTextColor(C_BG, nb);
+                M5Cardputer.Display.setCursor(154, BODYY+4+LH*3+6); M5Cardputer.Display.print("NO");
+            };
+            drawEG();
+            while(true){
+                char r = waitCh();
+                if(r==KLEFT||r==KRIGHT||r==KUP||r==KDOWN){ egSel=1-egSel; drawEG(); }
+                else if(r=='\r'){ break; }
+                else if(r=='\b'){ egSel=1; break; }
+            }
+            if(egSel == 0) break;  // exit loop and go to reveal with earlyTop
+        }
 
         bool quit=false;
         float ansVal=askQuestion(g_questions[qi],turn+1,MAX_Q_PER_GAME,&quit);
@@ -1922,148 +2020,173 @@ void runGame(){
         }
         g_answers[qi] = ansVal;
         asked[qi]     = true;
-        // Irrelevant doesn't count as a meaningful answer - skip adding to askedOrder
         if(ansVal != ANS_IRRELEVANT){
-            g_askedOrder[g_askedCnt++] = qi;
+            if(g_askedCnt < MAX_QUESTIONS)
+                g_askedOrder[g_askedCnt++] = qi;
         }
-        // Mark logically contradicted questions as irrelevant
         applyExclusions(qi, ansVal, asked);
+        earlyFound = 0;  // clear any stale early-guess candidates
     }
 
-    // All 20 questions done - dramatic pre-reveal screen
-    M5Cardputer.Display.fillScreen(C_BG);
-    titleBar("20 questions up!");
-    M5Cardputer.Display.setTextSize(2);
-    M5Cardputer.Display.setTextColor(C_TITFG, C_BG);
-    M5Cardputer.Display.setCursor(4, BODYY + 4);
-    M5Cardputer.Display.print("I have reached");
-    M5Cardputer.Display.setCursor(4, BODYY + 4 + LH);
-    M5Cardputer.Display.print("my conclusion.");
-
+    // ── Dramatic pre-reveal screen ────────────────────────────────────────────
+    // Use earlyTop if we broke out early, otherwise do a final score pass.
     Candidate top[TOP_N];
-    int found = scoreAllWords(top, TOP_N, 21, false);
-
-    waitForQuipDismiss();
-
-    // Guess top candidates
-    bool guessed=false; int guessedAt=-1;
-    for(int g=0;g<found&&!guessed;g++){
-        char dispName[WORD_LEN]={};
-        readWordName(top[g].idx,dispName,WORD_LEN);
-        for(int i=0;dispName[i];i++) if(dispName[i]=='_') dispName[i]=' ';
-
-        float conf=(g_askedCnt>0)?(top[g].score/(float)g_askedCnt*50.f+50.f):50.f;
-        if(conf>99.f)conf=99.f; if(conf<1.f)conf=1.f;
-
+    int found = 0;
+    if(earlyFound > 0){
+        // Already scored during early-guess check
+        for(int i=0;i<earlyFound;i++) top[i]=earlyTop[i];
+        found = earlyFound;
         M5Cardputer.Display.fillScreen(C_BG);
-        titleBar(g==0?"My best guess...":"Hmm, maybe...");
-        M5Cardputer.Display.setTextSize(2); M5Cardputer.Display.setTextColor(C_WARN,C_BG);
-        M5Cardputer.Display.setCursor(4,BODYY+4);
-        M5Cardputer.Display.print(g==0?"I think it's...":"Or is it...");
+        titleBar("I knew it!");
+        M5Cardputer.Display.setTextSize(2);
+        M5Cardputer.Display.setTextColor(C_TITFG, C_BG);
+        M5Cardputer.Display.setCursor(4, BODYY+4);
+        M5Cardputer.Display.print("Here are my");
+        M5Cardputer.Display.setCursor(4, BODYY+4+LH);
+        M5Cardputer.Display.print("top guesses...");
+        delay(1200);
+    } else {
+        M5Cardputer.Display.fillScreen(C_BG);
+        titleBar("20 questions up!");
+        M5Cardputer.Display.setTextSize(2);
+        M5Cardputer.Display.setTextColor(C_TITFG, C_BG);
+        M5Cardputer.Display.setCursor(4, BODYY+4);
+        M5Cardputer.Display.print("I have reached");
+        M5Cardputer.Display.setCursor(4, BODYY+4+LH);
+        M5Cardputer.Display.print("my conclusion.");
+        found = scoreAllWords(top, TOP_N, 21, false);
+        waitForQuipDismiss();
+    }
 
-        M5Cardputer.update();
+    // ── Simultaneous top-3 reveal ─────────────────────────────────────────────
+    // Read all candidate names up front (3 SD scans, then done).
+    char candName[TOP_N][WORD_LEN] = {};
+    float candConf[TOP_N] = {};
+    for(int i=0;i<found;i++){
+        readWordName(top[i].idx, candName[i], WORD_LEN);
+        for(int j=0; candName[i][j]; j++) if(candName[i][j]=='_') candName[i][j]=' ';
+        float c = (g_askedCnt>0) ? (top[i].score/(float)g_askedCnt*50.f+50.f) : 50.f;
+        if(c>99.f)c=99.f; if(c<1.f)c=1.f;
+        candConf[i] = c;
+    }
 
-        for(int dot=0;dot<3;dot++){
-            M5Cardputer.Display.setTextColor(C_TITFG,C_BG);
-            M5Cardputer.Display.setCursor(4+dot*16,BODYY+4+LH);
-            M5Cardputer.Display.print("."); delay(440);
+    // Rows: 0..found-1 = candidates, found = "None of these"
+    const int REVEAL_ROWS = found + 1;
+    int rvSel = 0;
+
+    const int ROW_H  = (DH - BODYY) / REVEAL_ROWS;
+    const int BAR_W  = 44;
+    const int BAR_X  = DW - BAR_W - 6;
+    const int NAME_CHARS = 11;  // max chars shown at textSize 2
+
+    auto drawReveal = [&](){
+        M5Cardputer.Display.fillScreen(C_BG);
+        titleBar("My guesses:");
+        for(int i=0;i<REVEAL_ROWS;i++){
+            int y = BODYY + i * ROW_H;
+            bool hi = (i == rvSel);
+            uint16_t bg = hi ? C_SELBG : C_BG;
+            if(hi) M5Cardputer.Display.fillRect(0, y, DW, ROW_H-1, C_SELBG);
+
+            if(i < found){
+                // Candidate row: ► name ... [bar] conf%
+                M5Cardputer.Display.setTextSize(2);
+                M5Cardputer.Display.setTextColor(hi ? C_TITFG : C_FG, bg);
+                M5Cardputer.Display.setCursor(14, y + (ROW_H-16)/2);
+                char trunc[NAME_CHARS+1];
+                strncpy(trunc, candName[i], NAME_CHARS); trunc[NAME_CHARS]=0;
+                M5Cardputer.Display.print(trunc);
+                // Confidence bar
+                int bw = (int)(candConf[i]/100.f * BAR_W);
+                uint16_t bc = (i==0) ? C_OK : (i==1) ? C_WARN : C_DIM;
+                int by = y + ROW_H - 7;
+                M5Cardputer.Display.fillRect(BAR_X, by, bw,    5, bc);
+                M5Cardputer.Display.drawRect(BAR_X, by, BAR_W, 5, C_DIM);
+                M5Cardputer.Display.setTextSize(1);
+                M5Cardputer.Display.setTextColor(C_DIM, bg);
+                M5Cardputer.Display.setCursor(BAR_X + BAR_W + 2, by);
+                M5Cardputer.Display.printf("%d%%", (int)candConf[i]);
+            } else {
+                // "None of these" row
+                M5Cardputer.Display.setTextSize(2);
+                M5Cardputer.Display.setTextColor(hi ? C_WARN : C_DIM, bg);
+                M5Cardputer.Display.setCursor(14, y + (ROW_H-16)/2);
+                M5Cardputer.Display.print("None of these");
+            }
+            if(hi){
+                M5Cardputer.Display.setTextColor(C_TITFG, bg);
+                M5Cardputer.Display.setCursor(2, y + (ROW_H-16)/2);
+                M5Cardputer.Display.print(">");
+            }
         }
-        M5Cardputer.Display.fillRect(0,BODYY+4+LH,DW,LH*2,C_BG);
-        M5Cardputer.Display.setTextColor(C_TITFG,C_BG);
-        M5Cardputer.Display.setCursor(4,BODYY+4+LH);
-        M5Cardputer.Display.print(dispName); M5Cardputer.Display.print("?");
-        int barW = (int)(conf / 100.f * (DW - 8));
-        M5Cardputer.Display.fillRect(4, BODYY + 4 + LH * 2 + 6, barW, 5, C_OK);
-        M5Cardputer.Display.drawRect(4, BODYY + 4 + LH * 2 + 6, DW - 8, 5, C_DIM);
-        M5Cardputer.Display.setTextSize(1); M5Cardputer.Display.setTextColor(C_DIM, C_BG);
-        M5Cardputer.Display.setCursor(4, BODYY + 4 + LH * 2 + 13);
-        M5Cardputer.Display.printf("Confidence: %d", (int)conf); M5Cardputer.Display.print("%");
+    };
 
-        delay(800);
-        M5Cardputer.update();
+    // Animate dots before showing the reveal
+    M5Cardputer.Display.fillScreen(C_BG);
+    titleBar("My top guesses...");
+    M5Cardputer.Display.setTextSize(2); M5Cardputer.Display.setTextColor(C_TITFG,C_BG);
+    M5Cardputer.Display.setCursor(4, BODYY+20);
+    for(int dot=0;dot<3;dot++){
+        M5Cardputer.Display.print("."); delay(500);
+    }
+    delay(200);
 
-                int btnY  = BODYY + 4 + LH * 3 + 6;
-        int yesX  = 18, noX = 136;
-        int btnW  = 84, btnH = LH + 4;
-        int ynSel = 1;   // default to NO - safer
+    drawReveal();
 
-        auto drawYN = [&](){
-            uint16_t yb = (ynSel == 0) ? C_OK  : C_DIM;
-            uint16_t nb = (ynSel == 1) ? C_ERR : C_DIM;
-            M5Cardputer.Display.fillRoundRect(yesX, btnY, btnW, btnH, 4, yb);
-            M5Cardputer.Display.fillRoundRect(noX,  btnY, btnW, btnH, 4, nb);
-            M5Cardputer.Display.setTextSize(2);
-            M5Cardputer.Display.setTextColor(C_BG, yb);
-            M5Cardputer.Display.setCursor(yesX + 24, btnY + 2);
-            M5Cardputer.Display.print("YES");
-            M5Cardputer.Display.setTextColor(C_BG, nb);
-            M5Cardputer.Display.setCursor(noX + 30, btnY + 2);
-            M5Cardputer.Display.print("NO");
-        };
+    while(true){
+        char r = waitCh();
+        if(r==KUP   && rvSel>0)              { rvSel--; drawReveal(); }
+        else if(r==KDOWN && rvSel<REVEAL_ROWS-1){ rvSel++; drawReveal(); }
+        else if(r=='\r') break;
+        else if(r=='\b'){ rvSel=REVEAL_ROWS-1; break; }  // Bksp = None
+    }
 
-        drawYN();
-        bool correct = false;
-        while(true){
-            char r = waitCh();
-            if(r == KLEFT || r == KRIGHT){ ynSel = 1 - ynSel; drawYN(); }
-            else if(r == KUP || r == KDOWN){ ynSel = 1 - ynSel; drawYN(); }
-            else if(r == '\r'){ correct = (ynSel == 0); break; }
-            else if(r == '\b'){ correct = false; break; }
-        }
+    bool guessed   = (rvSel < found);
+    int  guessedAt = guessed ? top[rvSel].idx : -1;
 
-        if(correct){
-            guessed=true; guessedAt=top[g].idx;
-        } else {
-            // Wrong guess - apply negative learning to push this word away
-            // from the current answer pattern. This helps differentiate
-            // similar words (e.g. computer vs laptop) over multiple games.
-            updateWordWeights(top[g].idx, false);
-        }
+    // Apply negative learning to wrong candidates that were NOT selected
+    for(int i=0;i<found;i++)
+        if(i != rvSel) updateWordWeights(top[i].idx, false);
 
-        if(guessed){
-            beep(1800,80); delay(100); beep(2400,80);
-            g_stats.computerWins++;
-            g_stats.gamesPlayed++;
-            g_stats.totalQuestions += g_askedCnt;
-            g_stats.currentStreak  = (g_stats.currentStreak>0) ? g_stats.currentStreak+1 : 1;
-            if(g_stats.currentStreak > g_stats.bestStreak) g_stats.bestStreak=g_stats.currentStreak;
-            saveStats();
-                       screenInit("Got it!");
-            M5Cardputer.Display.setTextSize(2);
-            M5Cardputer.Display.setTextColor(C_OK,   C_BG); M5Cardputer.Display.setCursor(4,BODYY+4);    M5Cardputer.Display.print("Yes! I knew it!");
-            M5Cardputer.Display.setTextColor(C_TITFG,C_BG); M5Cardputer.Display.setCursor(4,BODYY+4+LH); M5Cardputer.Display.print(dispName);
-            M5Cardputer.Display.setTextSize(1);
-            M5Cardputer.Display.setTextColor(C_DIM,  C_BG); M5Cardputer.Display.setCursor(4,BODYY+4+LH*2+4);
-            M5Cardputer.Display.printf("Confidence was: %d",(int)conf); M5Cardputer.Display.print("%");
-            waitCh();
-        }
+    if(guessed){
+        beep(1800,80); delay(100); beep(2400,80);
+        g_stats.computerWins++;
+        g_stats.gamesPlayed++;
+        g_stats.totalQuestions += g_askedCnt;
+        g_stats.currentStreak  = (g_stats.currentStreak>0) ? g_stats.currentStreak+1 : 1;
+        if(g_stats.currentStreak > g_stats.bestStreak) g_stats.bestStreak=g_stats.currentStreak;
+        if(catIdx >= 0 && catIdx < 5){ g_stats.catGames[catIdx]++; g_stats.catWins[catIdx]++; }
+        saveStats();
+        screenInit("Got it!");
+        M5Cardputer.Display.setTextSize(2);
+        M5Cardputer.Display.setTextColor(C_OK,   C_BG); M5Cardputer.Display.setCursor(4,BODYY+4);    M5Cardputer.Display.print("Yes! I knew it!");
+        M5Cardputer.Display.setTextColor(C_TITFG,C_BG); M5Cardputer.Display.setCursor(4,BODYY+4+LH); M5Cardputer.Display.print(candName[rvSel]);
+        M5Cardputer.Display.setTextSize(1);
+        M5Cardputer.Display.setTextColor(C_DIM,  C_BG); M5Cardputer.Display.setCursor(4,BODYY+4+LH*2+4);
+        M5Cardputer.Display.printf("Confidence was: %d%%",(int)candConf[rvSel]);
+        waitCh();
     }
 
     // ── Defeat screen ─────────────────────────────────────────────────────────
     if(!guessed){
-        char bestName[WORD_LEN]={};
-        readWordName(top[0].idx,bestName,WORD_LEN);
-        for(int i=0;bestName[i];i++) if(bestName[i]=='_') bestName[i]=' ';
-        float bestConf=(g_askedCnt>0)?(top[0].score/(float)g_askedCnt*50.f+50.f):50.f;
-        if(bestConf>99.f)bestConf=99.f; if(bestConf<1.f)bestConf=1.f;
-
         M5Cardputer.Display.fillScreen(C_BG); titleBar("You stumped me!");
         g_stats.playerWins++;
         g_stats.gamesPlayed++;
         g_stats.totalQuestions += g_askedCnt;
         g_stats.currentStreak  = (g_stats.currentStreak<0) ? g_stats.currentStreak-1 : -1;
         if(-g_stats.currentStreak > g_stats.bestPlayerStreak) g_stats.bestPlayerStreak=-g_stats.currentStreak;
+        if(catIdx >= 0 && catIdx < 5) g_stats.catGames[catIdx]++;
         saveStats();
         M5Cardputer.Display.setTextSize(2);
-        M5Cardputer.Display.setTextColor(C_WARN,C_BG); M5Cardputer.Display.setCursor(4,BODYY+2);    M5Cardputer.Display.print("I couldn't get it.");
-        M5Cardputer.Display.setTextColor(C_DIM, C_BG); M5Cardputer.Display.setCursor(4,BODYY+2+LH); M5Cardputer.Display.print("My best guess was:");
-        M5Cardputer.Display.setTextColor(C_ERR, C_BG); M5Cardputer.Display.setCursor(4,BODYY+2+LH*2); M5Cardputer.Display.print(bestName);
-        int barW=(int)(bestConf/100.f*(DW-8));
+        M5Cardputer.Display.setTextColor(C_WARN,C_BG); M5Cardputer.Display.setCursor(4,BODYY+2);     M5Cardputer.Display.print("I couldn't get it.");
+        M5Cardputer.Display.setTextColor(C_DIM, C_BG); M5Cardputer.Display.setCursor(4,BODYY+2+LH);  M5Cardputer.Display.print("My best guess was:");
+        M5Cardputer.Display.setTextColor(C_ERR, C_BG); M5Cardputer.Display.setCursor(4,BODYY+2+LH*2);M5Cardputer.Display.print(found>0?candName[0]:"?");
+        int barW = found>0 ? (int)(candConf[0]/100.f*(DW-8)) : 0;
         M5Cardputer.Display.fillRect(4,BODYY+2+LH*3+2,barW,5,C_ERR);
         M5Cardputer.Display.drawRect(4,BODYY+2+LH*3+2,DW-8,5,C_DIM);
         M5Cardputer.Display.setTextSize(1); M5Cardputer.Display.setTextColor(C_DIM,C_BG);
         M5Cardputer.Display.setCursor(4,BODYY+2+LH*3+10);
-        M5Cardputer.Display.printf("Confidence: %d",(int)bestConf); M5Cardputer.Display.print("% (not great!)");
+        if(found>0) M5Cardputer.Display.printf("Confidence: %d%% (not great!)",(int)candConf[0]);
         waitCh();
     }
 
@@ -2170,9 +2293,34 @@ static void pageDots(int cur, int total){
         M5Cardputer.Display.fillCircle(DW-4-(total-1-i)*10, TITLEH/2, 3, i==cur?C_FG:C_DIM);
 }
 
+// Read up to `count` word names starting at startIdx from words.csv.
+// Returns number actually read. Replaces '_' with spaces.
+static int readWordBatch(int startIdx, char names[][WORD_LEN], int count){
+    File f=SD.open("/TwentyQ/words.csv"); if(!f) return 0;
+    int n=0, loaded=0;
+    while(f.available() && loaded<count){
+        String ln=f.readStringUntil('\n'); ln.trim();
+        if(!ln.length()||ln[0]=='#') continue;
+        if(n >= startIdx){
+            int comma=ln.indexOf(',');
+            String nm=(comma>0)?ln.substring(0,comma):ln; nm.trim();
+            strncpy(names[loaded],nm.c_str(),WORD_LEN-1); names[loaded][WORD_LEN-1]=0;
+            for(int i=0;names[loaded][i];i++) if(names[loaded][i]=='_') names[loaded][i]=' ';
+            loaded++;
+        }
+        n++;
+    }
+    f.close(); return loaded;
+}
+
 void statsScreen(){
-    const int PAGES=3;
+    const int PAGES=5;
     int page=0;
+    // Word browser state
+    int wbScroll=0;
+    const int WB_ROWS=visRows();
+    char wbNames[7][WORD_LEN]={};   // one extra for safety
+
     while(true){
         M5Cardputer.Display.fillScreen(C_BG);
         char pbuf[18]; snprintf(pbuf,18,"Stats %d/%d",page+1,PAGES);
@@ -2194,8 +2342,7 @@ void statsScreen(){
             M5Cardputer.Display.setTextSize(1);
             M5Cardputer.Display.setTextColor(C_DIM,C_BG);
             M5Cardputer.Display.setCursor(4,BODYY+62);
-            M5Cardputer.Display.printf("Computer accuracy: %d",pct);
-            M5Cardputer.Display.print("%");
+            M5Cardputer.Display.printf("Computer accuracy: %d%%",pct);
             int bw=(int)((float)pct/100.f*(DW-8));
             uint16_t bc=pct>70?C_ERR:pct>40?C_WARN:C_OK;
             M5Cardputer.Display.fillRect(4,BODYY+71,bw,5,bc);
@@ -2214,24 +2361,75 @@ void statsScreen(){
             M5Cardputer.Display.drawFastHLine(4,BODYY+62,DW-8,C_DIM);
             statRow(4,BODYY+66,"TOTAL QUESTIONS",(snprintf(buf,32,"%d",g_stats.totalQuestions),buf),C_TITFG);
 
-        } else {
+        } else if(page==2){
+            // Per-category win rates
+            M5Cardputer.Display.setTextSize(1); M5Cardputer.Display.setTextColor(C_DIM,C_BG);
+            M5Cardputer.Display.setCursor(4,BODYY+2); M5Cardputer.Display.print("CATEGORY WIN RATES");
+            const uint16_t catCols[] = {C_OK, 0x47E0u, C_WARN, C_TITFG, C_DIM};
+            for(int i=0;i<5;i++){
+                int y=BODYY+14+i*20;
+                int cg=g_stats.catGames[i], cw=g_stats.catWins[i];
+                int pct=cg>0?(cw*100/cg):0;
+                // Category name
+                M5Cardputer.Display.setTextSize(1); M5Cardputer.Display.setTextColor(catCols[i],C_BG);
+                M5Cardputer.Display.setCursor(4,y);
+                M5Cardputer.Display.printf("%-8s %2d/%2d",CATEGORIES[i].label,cw,cg);
+                // Win bar
+                int bw=cg>0?(int)((float)pct/100.f*120):0;
+                M5Cardputer.Display.fillRect(106,y,bw,7,catCols[i]);
+                M5Cardputer.Display.drawRect(106,y,120,7,C_DIM);
+                M5Cardputer.Display.setCursor(232,y);
+                if(cg>0) M5Cardputer.Display.printf("%d%%",pct);
+            }
+
+        } else if(page==3){
             // Database + last word
             statRow(4,BODYY+2,"WORD DATABASE",(snprintf(buf,32,"%d words",g_wordCnt),buf),C_TITFG);
             M5Cardputer.Display.drawFastHLine(4,BODYY+30,DW-8,C_DIM);
-            M5Cardputer.Display.setTextSize(1);
-            M5Cardputer.Display.setTextColor(C_DIM,C_BG);
+            M5Cardputer.Display.setTextSize(1); M5Cardputer.Display.setTextColor(C_DIM,C_BG);
             M5Cardputer.Display.setCursor(4,BODYY+34);
             M5Cardputer.Display.print("LAST WORD TAUGHT");
-            M5Cardputer.Display.setTextSize(2);
-            M5Cardputer.Display.setTextColor(C_WARN,C_BG);
+            M5Cardputer.Display.setTextSize(2); M5Cardputer.Display.setTextColor(C_WARN,C_BG);
             M5Cardputer.Display.setCursor(4,BODYY+43);
             M5Cardputer.Display.print(g_stats.lastWord[0]?g_stats.lastWord:"(none yet)");
+            M5Cardputer.Display.setTextSize(1); M5Cardputer.Display.setTextColor(C_DIM,C_BG);
+            M5Cardputer.Display.setCursor(4,BODYY+77);
+            M5Cardputer.Display.print("► page 5: browse word list");
+
+        } else {
+            // Word browser - scrollable list of known words
+            int loaded=readWordBatch(wbScroll, wbNames, WB_ROWS);
+            M5Cardputer.Display.setTextSize(2);
+            for(int i=0;i<loaded;i++){
+                int y=BODYY+i*LH;
+                M5Cardputer.Display.setTextColor(C_FG,C_BG);
+                M5Cardputer.Display.setCursor(4,y);
+                M5Cardputer.Display.print(wbNames[i]);
+            }
+            if(loaded==0){
+                M5Cardputer.Display.setTextColor(C_DIM,C_BG);
+                M5Cardputer.Display.setCursor(4,BODYY+4);
+                M5Cardputer.Display.print("(empty)");
+            }
+            // Scroll indicator
+            M5Cardputer.Display.setTextSize(1); M5Cardputer.Display.setTextColor(C_DIM,C_BG);
+            M5Cardputer.Display.setCursor(4,DH-10);
+            M5Cardputer.Display.printf("#%d-%d of %d",wbScroll+1,wbScroll+loaded,g_wordCnt);
         }
 
         char c=waitCh();
-        if(c==KLEFT  && page>0)       page--;
-        else if(c==KRIGHT&&page<PAGES-1) page++;
-        else if(c=='\b'||c=='\r')     return;
+        if(page==4){
+            // Word browser navigation
+            if(c==KUP   && wbScroll>0)                            { wbScroll--; continue; }
+            if(c==KDOWN && wbScroll+WB_ROWS < g_wordCnt)          { wbScroll++; continue; }
+            if(c==KLEFT && page>0)                                 { page--; continue; }
+            if(c==KRIGHT)                                          { /* already last page */ continue; }
+            if(c=='\b'||c=='\r')                                   return;
+        } else {
+            if(c==KLEFT  && page>0)          page--;
+            else if(c==KRIGHT&&page<PAGES-1) page++;
+            else if(c=='\b'||c=='\r')        return;
+        }
     }
 }
 
