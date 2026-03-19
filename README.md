@@ -28,27 +28,32 @@ A self-learning 20 Questions game for the [M5Cardputer](https://shop.m5stack.com
 
 ## Installation
 
-### 1. Flash the sketch
-
-Open `TwentyQ.ino` in Arduino IDE with M5Stack board support installed. Select board **M5Cardputer** (or M5StampS3) and upload.
-
-**Required library:** `M5Cardputer` ([M5Stack GitHub](https://github.com/m5stack/M5Cardputer))
-
-### 2. Copy SD card files
-
-Copy the contents of `sd_card/` to your MicroSD card root. You should end up with:
-
+### Option A: WiFi download (easiest)
+ 
+1. Flash `TwentyQ.ino` to the M5Cardputer via Arduino IDE
+2. Insert a blank MicroSD card
+3. Power on - the game detects missing files and offers to download them via WiFi
+4. Pick your WiFi network from the scan list, type the password
+5. Files download with progress bars, then the game starts
+ 
+### Option B: Manual file copy
+ 
+1. Flash `TwentyQ.ino` to the M5Cardputer
+2. Copy the `sd_card/TwentyQ/` folder to your MicroSD card root:
+ 
 ```
 SD card root/
   TwentyQ/
-    words.csv       (11 KB - word list)
-    questions.csv   (2.5 KB - question list)
-    weights.bin     (99,100 bytes - weight matrix)
-    settings.cfg    (optional - auto-created)
-    stats.cfg       (optional - auto-created)
+    words.csv       (11 KB)
+    questions.csv   (2.5 KB)
+    weights.bin     (99,100 bytes)
 ```
-
-> **Verify** that `weights.bin` is exactly **99,100 bytes** on the SD card. If smaller, the copy was interrupted.
+ 
+3. Insert the SD card and power on
+ 
+**Required library:** `M5Cardputer` ([M5Stack GitHub](https://github.com/m5stack/M5Cardputer))
+ 
+> **Note:** If copying manually, verify `weights.bin` is exactly **99,100 bytes** on the SD card.
 
 ### 3. Boot and play
 
@@ -125,6 +130,10 @@ Settings > Learning:
 - **Conservative** (0.10) - slow, stable
 - **Normal** (0.20) - default
 - **Aggressive** (0.35) - fast, may oscillate
+
+### Re-downloading files
+ 
+Settings > Download files will re-download all game files from GitHub via WiFi. This overwrites words, questions, and weights with the latest versions from the repository.
 
 ## Troubleshooting
 
